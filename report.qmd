@@ -1,14 +1,88 @@
 ---
-title: "Test title"
+title: "The Fatality of the American Gun Lobby"
+subtitle: "Pro-gun lobbying efforts and mental health effects on suicide by gun"
+author: "Mitchell Harrison"
 format: pdf
+execute: 
+  warning: false
+  message: false
+  echo: false
 ---
+
+# Introduction
+
+Gun violence continues to be a staple of American politics, especially following
+a series of high-profile assassination attempts on President-Elect Trump and the
+recent murder of UnitedHealthcare CEO Brian Thompson. Americans in opposition to
+federal gun ownership restrictions often cite mental health as the reason for 
+America's gun violence epidemic. In contrast, supporters of gun restrictions 
+regularly blame America's comparatively loose regulatory environment and special
+interest group involvement for the violence.
+
+According to the Centers for Disease Control and Prevention (CDC), suicide by 
+firearm accounts for more than half of gun deaths in the United States. While 
+school shootings, mass shootings, and high-profile assassinations are regularly 
+brought into mainstream political discourse, suicide by gun is less frequently 
+discussed. In this study, we investigate the potential relationships between 
+pro-gun special interest group activity, mental health, and suicide by firearm. 
+We aggregate over ten million responses to CDC health surveys, three million 
+special interest group reports, and suicide by firearm rates for all 50 states. 
+These data are then used to build a multiple linear regression model to control 
+for the impact of lobbying efforts and mental health on rates of suicide by gun.
+
+## The Data
+
+We have aggregated and cleaned data from three distinct sources. First, mental 
+health data is pulled from the CDC 
+[Behavioral Risk Factor Surveillance Survey](https://www.cdc.gov/brfss/annual_data/annual_data.htm)
+(BRFSS). The survey began including mental health questions in 1994. The 
+question of interest for this study is:
+
+*"Now thinking about your mental health, which includes stress, depression, and*
+*problems with emotions, for how many days during the past 30 days was your*
+*mental health not good?"*
+
+Responses are given an integer value between 1 and 30. Respondents with zero 
+days of poor mental health are encoded with the value 88, which we have 
+re-encoded as 0. Non-responses are not considered. Ultimately, 10,249,613 were 
+considered, aggregated by state and year, and included in the model. We encode 
+these responses as binary: "Poor" or "Good" mental health. The CDC defines 15 or
+more days of poor mental health in a 30-day period as concerning, so we encode 
+responses of 15 or greater as "Poor" and others as "Good."
+
+The CDC also provides absolute number and per-capita suicide data by state through
+their [CDC WONDER](https://wonder.cdc.gov/cmf-icd10.html) platform. 
+Per-state proportions of suicides that were completed with firearms were 
+compiled by the [RAND Corporation](https://www.rand.org/pubs/tools/TL354.html), 
+a non-profit, non-partisan think tank that tracks and reports on several 
+high-profile political issues in the United States. We calculate total firearm 
+suicide deaths by multiplying the total suicides of all types reported by the 
+CDC and the proportion of those that were completed by firearm reported by RAND.
+
+Special interest group activity is provided by 
+[Hall et al.](https://www.cambridge.org/core/journals/state-politics-and-policy-quarterly/article/chorus-a-new-dataset-of-state-interest-group-policy-positions-in-the-united-states/6827DC9EC72301016894F265777C0078) (2024). 
+Their special interest dataset reports 13,619,409 individual state-level special 
+interest group positions. We filter those positions using regular expression 
+filters built by hand from group names listed on
+[OpenSecrets](https://www.opensecrets.org/federal-lobbying/industries/lobbyists?cycle=2024&id=Q13), 
+the website of the eponymous non-profit organization that tracks lobbying groups 
+and campaign finance in Washington, DC. We aggregate firearm-related special 
+interest group activity by year to include in the model.
+
+We aggregate all of these data (unique interest activity, suicide count, 
+gun-specific suicide rate, reported mental health) into a single dataset that 
+we use to build our model.
+
 
 ```{r}
 #| label: import-data-and-libs
 
 library(ggthemes)
+library(gt)
 library(tidymodels)
 library(tidyverse)
+
+set.seed(440)
 
 death <- read_csv("data/total_death_data.csv")
 lobby <- arrow::read_parquet("data/lobbyists.parquet")
@@ -32,24 +106,8 @@ gun_groups <- lobby |>
 ```
 
 ```{r}
-death_group <- death |>
-  group_by(year) |>
-  summarise(death_count = sum(gun_suicides))
+#| label: summarise-gun-data
 
-gun_groups |>
-  group_by(year) |>
-  summarise(count = n()) |>
-  left_join(death_group) |>
-  pivot_longer(cols = -year, names_to = "var", values_to = "count") |>
-  filter(year <= 2016) |>
-  ggplot(aes(x = year, y = count, color = var)) +
-  geom_line(linewidth = 2) +
-  theme_fivethirtyeight() +
-  scale_color_wsj() +
-  facet_wrap(~var, nrow = 2, scales = "free_y")
-```
-
-```{r}
 gun_group_count <- gun_groups |>
   group_by(year) |>
   summarise(lobbyist_positions = n())
@@ -57,25 +115,107 @@ gun_group_count <- gun_groups |>
 mean_death_year <- death |>
   group_by(year) |>
   summarise(
-    gun_suicide_rate = mean(mean_fs_s, na.rm = TRUE),
+    population = sum(population),
+    gun_suicides = sum(gun_suicides, na.rm = TRUE),
+    gun_rate = mean(mean_fs_s, na.rm = TRUE),
     poor_mental_rate = mean(p_poor_mental, na.rm = TRUE)
   )
 ```
 
 ```{r}
-#| label: build-the-model
+#| label: pearson-correlation-of-predictors
 
 model_data <- gun_group_count |>
   left_join(mean_death_year) |>
+  mutate(gun_suicides_per_100k = gun_suicides / (population / 100000)) |>
+  select(-gun_suicides) |>
   filter(year < 2017)
+
+pearson_cor <- cor(
+  select(model_data, -c(year, gun_suicides_per_100k, population))
+)
+round(pearson_cor, 3)
+```
+
+```{r}
+#| label: build-the-model
 
 model_spec <- linear_reg() |>
   set_engine("lm")
 
 model <- model_spec |>
   fit(
-    gun_suicide_rate ~ lobbyist_positions + poor_mental_rate,
+    gun_suicides_per_100k ~ lobbyist_positions + poor_mental_rate,
     data = model_data
   )
+
+tidy(model)
+```
+
+```{r}
+#| label: get-model-r2-value
+
+model_r2 <- round(summary(model$fit)$adj.r.squared, 3)
+model_r2
+```
+
+```{r}
+#| label: plot-qqplot
+
+resid_data <- model_data |>
+  select(gun_suicides_per_100k) |>
+  mutate(
+    preds = predict(model, new_data = model_data)$.pred,
+    resids = gun_suicides_per_100k - preds
+  )
+
+resid_data |>
+  ggplot(aes(sample = resids)) +
+  stat_qq_line(color = "darkorange", linewidth = 1) +
+  stat_qq(size = 4, color = "darkcyan") +
+  labs(
+    x = "Theoretical Quantiles",
+    y = "Observed Quantiles",
+    title = "Q-Q Plot of Residuals"
+  ) +
+  theme_fivethirtyeight() +
+  theme(
+    plot.background = element_rect(fill = "white"),
+    panel.background = element_rect(fill = "white"),
+    axis.title = element_text()
+  )
+```
+
+```{r}
+#| label: residual-distribution
+
+resid_data |>
+  ggplot(aes(x = resids)) +
+  geom_histogram(
+    aes(y = after_stat(density)), 
+    fill = "darkcyan", 
+    color = "black",
+    bins = 15
+  ) +
+  geom_density(color = "darkorange", linewidth = 2) +
+  theme_fivethirtyeight() +
+  labs(
+    x = "Residuals",
+    y = "Density",
+    title = "Model Residual Distribution",
+    subtitle = "Note: the histogram is normalized to make the density visible"
+  ) +
+  theme(
+    plot.background = element_rect(fill = "white"),
+    panel.background = element_rect(fill = "white"),
+    axis.title = element_text()
+  )
+```
+
+```{r}
+#| label: residual-shapiro-test
+
+shapiro_results <- shapiro.test(resid_data$resids)
+shapiro_results
 ```
 

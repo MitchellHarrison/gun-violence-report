@@ -3,7 +3,6 @@ library(tidyverse)
 # load mental health and gun suicide data
 mntl <- read_csv("data/mental_health.csv")
 deaths <- read_csv("data/gun_suicides.csv")
-lobbyists <- arrow::read_parquet("data/lobbyists.parquet")
 
 # get mean proportion of suicides that were by gun
 owner <- readxl::read_excel(
