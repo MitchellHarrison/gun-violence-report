@@ -6,3 +6,6 @@
 *.parquet
 *.xpt
 *.XPT
+*.xlsx
+*.txt
+*.csv
