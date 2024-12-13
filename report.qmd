@@ -7,6 +7,7 @@ format: pdf
 #| label: import-data-and-libs
 
 library(ggthemes)
+library(tidymodels)
 library(tidyverse)
 
 death <- read_csv("data/total_death_data.csv")
@@ -47,3 +48,34 @@ gun_groups |>
   scale_color_wsj() +
   facet_wrap(~var, nrow = 2, scales = "free_y")
 ```
+
+```{r}
+gun_group_count <- gun_groups |>
+  group_by(year) |>
+  summarise(lobbyist_positions = n())
+
+mean_death_year <- death |>
+  group_by(year) |>
+  summarise(
+    gun_suicide_rate = mean(mean_fs_s, na.rm = TRUE),
+    poor_mental_rate = mean(p_poor_mental, na.rm = TRUE)
+  )
+```
+
+```{r}
+#| label: build-the-model
+
+model_data <- gun_group_count |>
+  left_join(mean_death_year) |>
+  filter(year < 2017)
+
+model_spec <- linear_reg() |>
+  set_engine("lm")
+
+model <- model_spec |>
+  fit(
+    gun_suicide_rate ~ lobbyist_positions + poor_mental_rate,
+    data = model_data
+  )
+```
+
