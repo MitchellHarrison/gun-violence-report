@@ -1,5 +1,5 @@
 ---
-title: "The Fatality of the American Gun Lobby"
+title: "The Lethality of the American Gun Lobby"
 subtitle: "Pro-gun lobbying efforts and mental health effects on suicide by gun"
 author: "Mitchell Harrison"
 format: pdf
@@ -8,6 +8,55 @@ execute:
   message: false
   echo: false
 ---
+
+```{r}
+#| label: import-data-and-libs
+
+library(ggthemes)
+library(gt)
+library(tidymodels)
+library(tidyverse)
+
+set.seed(440)
+
+death <- read_csv("data/total_death_data.csv")
+lobby <- arrow::read_parquet("data/lobbyists.parquet")
+
+# these regex filters were created manually by visiting the OpenSecrets
+# website's catalog of gun lobbying groups here:
+# https://www.opensecrets.org/federal-lobbying/industries/lobbyists?cycle=2024&id=Q13
+
+gun_filter <- paste(
+  "gun", "rifle", "safari club", "shoot", "crockett club", 
+  "bear arms", "firearm",
+  sep = "|"
+)
+
+gun_groups <- lobby |>
+  filter(str_detect(client_name, regex(gun_filter, ignore_case = TRUE))) |>
+  select(year, client_name, position, state) |>
+  rename(state_id = "state") |>
+  mutate(state = state.name[match(state_id, state.abb)]) |>
+  select(-state_id)
+```
+
+```{r}
+#| label: summarise-gun-data
+
+gun_group_count <- gun_groups |>
+  group_by(year) |>
+  summarise(lobbyist_positions = n())
+
+mean_death_year <- death |>
+  group_by(year) |>
+  summarise(
+    population = sum(population),
+    gun_suicides = sum(gun_suicides, na.rm = TRUE),
+    gun_rate = mean(mean_fs_s, na.rm = TRUE),
+    poor_mental_rate = mean(p_poor_mental, na.rm = TRUE)
+  ) |>
+  filter(year < 2017)
+```
 
 # Introduction
 
@@ -73,57 +122,52 @@ We aggregate all of these data (unique interest activity, suicide count,
 gun-specific suicide rate, reported mental health) into a single dataset that 
 we use to build our model.
 
+# Methodology
+
+Each row in our final dataset represents a single year as a national aggregate. 
+Although health and firearm data is aggregated by state, lobbying efforts occur 
+in fewer than half of all states, so we simply take the total number of lobbying
+efforts nationwide to avoid losing the majority of states that do not have 
+state-level lobbying efforts. Because inter-state gun transfers are common
+([Roberts et al., 2024](https://pmc.ncbi.nlm.nih.gov/articles/PMC11004838/)), 
+taking a national aggregate is justified, even when many states are not 
+represented.
+
+Since the resulting dataset has one row per year, we are left with only 19 
+observations. Although tens of millions of observations were combined to arrive 
+at the data, we must take some special consideration when building a regression 
+model with fewer than 30 observations.
+
+First, to avoid over-fitting, we use only use two predictors. A common heuristic
+in statistics is that the degrees of freedom should be no more than 
+$\frac{n}{10}$, or two predictors in this case. Initially, we chose three 
+predictors, but after observing a strong negative correlation between two of 
+them, we ultimately removed one and arrived at two predictors: lobbyist activity
+count and the proportion of people reporting poor mental health. (See the 
+results section for additional detail).
+
+To test the validity of our findings (especially with $n=19$ observations), we 
+also conduct a Shapiro-Wilk test on our residuals to verify the assumption of 
+residual normality that linear regression requires. We further verify our 
+results by constructing a quantile-quantile plot and discussing its content. 
+Finally, we will use adjusted $R^2$ instead of traditional $R^2$ to discuss the 
+model, as adding predictors will always increase $R^2$, even if those predictors 
+are not truly meaningful. This problem is more pronounced in models trained with
+smaller datasets. Using adjusted $R^2$ will help us combat that problem.
+
+# Results
+
+In our multiple linear regression model, our outcome variable is the number of 
+suicides by gun per 100,000 citizens of the United States. Initially, we 
+constructed our model with three predictors: lobbying activity, the proportion 
+of poor mental health, and the mean proportion of all suicides that were 
+completed with firearms. Using three predictors for $n=19$ observations violates 
+our heuristic discussed in the methodology section (using $\frac{n}{10}$ degrees 
+of freedom), which we will discuss below. Our three-predictor model is shown 
+below:
 
 ```{r}
-#| label: import-data-and-libs
-
-library(ggthemes)
-library(gt)
-library(tidymodels)
-library(tidyverse)
-
-set.seed(440)
-
-death <- read_csv("data/total_death_data.csv")
-lobby <- arrow::read_parquet("data/lobbyists.parquet")
-
-# these regex filters were created manually by visiting the OpenSecrets
-# website's catalog of gun lobbying groups here:
-# https://www.opensecrets.org/federal-lobbying/industries/lobbyists?cycle=2024&id=Q13
-
-gun_filter <- paste(
-  "gun", "rifle", "safari club", "shoot", "crockett club", 
-  "bear arms", "firearm",
-  sep = "|"
-)
-
-gun_groups <- lobby |>
-  filter(str_detect(client_name, regex(gun_filter, ignore_case = TRUE))) |>
-  select(year, client_name, position, state) |>
-  rename(state_id = "state") |>
-  mutate(state = state.name[match(state_id, state.abb)]) |>
-  select(-state_id)
-```
-
-```{r}
-#| label: summarise-gun-data
-
-gun_group_count <- gun_groups |>
-  group_by(year) |>
-  summarise(lobbyist_positions = n())
-
-mean_death_year <- death |>
-  group_by(year) |>
-  summarise(
-    population = sum(population),
-    gun_suicides = sum(gun_suicides, na.rm = TRUE),
-    gun_rate = mean(mean_fs_s, na.rm = TRUE),
-    poor_mental_rate = mean(p_poor_mental, na.rm = TRUE)
-  )
-```
-
-```{r}
-#| label: pearson-correlation-of-predictors
+#| label: build-the-model-3-preds
 
 model_data <- gun_group_count |>
   left_join(mean_death_year) |>
@@ -131,45 +175,154 @@ model_data <- gun_group_count |>
   select(-gun_suicides) |>
   filter(year < 2017)
 
+model_spec <- linear_reg() |>
+  set_engine("lm")
+
+model1 <- model_spec |>
+  fit(
+    gun_suicides_per_100k ~ lobbyist_positions + poor_mental_rate + gun_rate,
+    data = model_data
+  )
+
+summary1 <- tidy(model1) 
+summary1$term <- c(
+  "Intercept",
+  "Number of lobbying activities",
+  "Rate of poor mental health",
+  "Rate of suicides by gun"
+)
+colnames(summary1) <- c("Variable", "Estimate", "Std. Error", "Statistic", 
+                        "P-value")
+
+summary1 |>
+  gt() |>
+  fmt_number(decimals = 3) |>
+  tab_header(md("**Model results (three predictors)**")) |>
+  text_transform(
+    locations = cells_body(),
+    fn = function(x) {
+      case_when(
+        x < 0.001 & x != 0 ~ "<0.001",
+        TRUE ~ as.character(x)
+      )
+    }
+  ) |>
+  gtsave("tables/model1_results.png")
+```
+
+to test the validity of our findings, especially with few observations, we 
+calculate the pearson coefficients for our predictors. for our use case, we will 
+consider correlations with an absolute value greater than 0.8 too high for 
+combined use in our model. figure 2 shows the pearson coefficients of our three 
+predictors:
+
+```{r}
+#| label: pearson-correlation-of-predictors
+#| fig-cap: "figure 2: pearson coefficients (three-variable model)"
+
 pearson_cor <- cor(
   select(model_data, -c(year, gun_suicides_per_100k, population))
 )
-round(pearson_cor, 3)
+
+pred_names <- c(
+  "Lobbying",
+  "Gun Suicide",
+  "Mental Health"
+)
+
+pearson <- tibble(data.frame(pearson_cor)) |>
+  mutate(var = pred_names) |>
+  select(var, lobbyist_positions, gun_rate, poor_mental_rate)
+colnames(pearson) <- c("x", pred_names)
+
+pearson |>
+  gt() |>
+  fmt_number(decimals = 3) |>
+  cols_label(x = "") |>
+  tab_header(md("**Pearson Coefficients**")) |>
+  tab_style(
+    style = list(
+      cell_fill(color = "lightgray"),
+      cell_text(weight = "bold")
+    ),
+    locations = cells_body(col = 3, rows = 3)
+  ) |>
+  tab_style(
+    style = list(
+      cell_fill(color = "lightgray"),
+      cell_text(weight = "bold")
+    ),
+    locations = cells_body(col = 4, rows = 2)
+  ) |>
+  gtsave("tables/model1_pearson.png")
 ```
 
+::: {layout-ncol=2}
+![Figure 1: Model results](tables/model1_results.png)
+
+![Figure 2: Pearson coefficients](tables/model1_pearson.png){width=90%}
+:::
+
+To avoid potential multicollinearity in our model and to get closer to our 
+$\frac{n}{10}$ degrees of freedom heuristic, we remove the proportion of 
+suicides by gun from the model. Because we are specifically interested in the 
+effects of mental health and lobbying activities, eliminating mental health 
+reports from our model to reduce the probability of multicollinearity would be 
+unwise. Thus, we are left with our final two predictors and a new model. The 
+results of that model are shown in Figure 3.
+
 ```{r}
-#| label: build-the-model
+#| label: build-the-model-2-preds
 
 model_spec <- linear_reg() |>
   set_engine("lm")
 
-model <- model_spec |>
+model2 <- model_spec |>
   fit(
     gun_suicides_per_100k ~ lobbyist_positions + poor_mental_rate,
     data = model_data
   )
 
-tidy(model)
+summary2 <- tidy(model2) 
+summary2$term <- c(
+  "Intercept",
+  "Number of Lobbying Activities",
+  "Rate of Poor Mental Health"
+)
+colnames(summary2) <- c("Variable", "Estimate", "Std. Error", "Statistic", 
+                        "P-value")
+
+summary2 |>
+  gt() |> 
+  fmt_number(decimals = 3) |>
+  tab_header(md("**Model Results (two predictors)**")) |>
+  text_transform(
+    locations = cells_body(),
+    fn = function(x) {
+      case_when(
+        x < 0.001 & x != 0 ~ "<0.001",
+        TRUE ~ as.character(x)
+      )
+    }
+  ) |>
+  gtsave("tables/model2_results.png")
 ```
 
-```{r}
-#| label: get-model-r2-value
-
-model_r2 <- round(summary(model$fit)$adj.r.squared, 3)
-model_r2
-```
+![Model results](tables/model2_results.png){width=70%}
 
 ```{r}
 #| label: plot-qqplot
+#| fig-height: 5
+#| fig-asp: 0.618
 
 resid_data <- model_data |>
   select(gun_suicides_per_100k) |>
   mutate(
-    preds = predict(model, new_data = model_data)$.pred,
+    preds = predict(model2, new_data = model_data)$.pred,
     resids = gun_suicides_per_100k - preds
   )
 
-resid_data |>
+qqplot <- resid_data |>
   ggplot(aes(sample = resids)) +
   stat_qq_line(color = "darkorange", linewidth = 1) +
   stat_qq(size = 4, color = "darkcyan") +
@@ -184,12 +337,16 @@ resid_data |>
     panel.background = element_rect(fill = "white"),
     axis.title = element_text()
   )
+
+ggsave("plots/qqplot.png", dpi = 300, plot = qqplot)
 ```
 
 ```{r}
 #| label: residual-distribution
+#| fig-width: 6
+#| fig-asp: 0.618
 
-resid_data |>
+resid_dist <- resid_data |>
   ggplot(aes(x = resids)) +
   geom_histogram(
     aes(y = after_stat(density)), 
@@ -203,19 +360,114 @@ resid_data |>
     x = "Residuals",
     y = "Density",
     title = "Model Residual Distribution",
-    subtitle = "Note: the histogram is normalized to make the density visible"
   ) +
   theme(
     plot.background = element_rect(fill = "white"),
     panel.background = element_rect(fill = "white"),
     axis.title = element_text()
   )
+
+ggsave("plots/resid_distribution.png", dpi = 300, plot = resid_dist)
 ```
 
 ```{r}
 #| label: residual-shapiro-test
 
 shapiro_results <- shapiro.test(resid_data$resids)
-shapiro_results
+p_shapiro <- round(shapiro_results$p.value, 2)
 ```
 
+```{r}
+#| label: get-model-r2-value
+
+model_r2 <- round(summary(model2$fit)$adj.r.squared, 2)
+```
+
+Both of our predictors are statistically significant at the $\alpha = 0.05$ 
+significance level. However, the amount of lobbyist activity has a substantially 
+lower p-value ($p < 0.001$), and our model has an adjusted $R^2$ of 
+`r model_r2`. However, because of our small dataset, further investigation is 
+necessary to confirm our findings. First, we should verify the residual 
+normality assumption. Figure 4 shows the distribution of our residuals, but with 
+$n=19$ residuals, it is difficult to confirm their normality visually. Instead, 
+we can conduct a Shapiro-Wilk test to test the probability that our residuals 
+come from a normal distribution.
+
+In a Shapiro-Wilk test, our null hypothesis is that our data *is* normally 
+distributed. As such, a p-value of less than 0.05 means that our residual 
+normality assumption is violated. However, with a p-value of `r p_shapiro`, our 
+residuals are likely to be normally distributed. We construct a 
+quantile-quantile plot in Figure 5 to further verify our performance. With each 
+point closely approaching the mathematical ideal, Figure 5 gives additional 
+confidence to our findings.
+
+While holding the proportion of the population reporting poor mental health 
+constant, every additional pro-gun lobbyist effort adds an expected 0.001 deaths 
+per 100,000 people. The United States population is around 338,000,000 people. 
+Therefore, an expected increase of 0.001 deaths per 100,000 people means each 
+additional lobbying effort produces an expected 3.38 additional deaths while 
+holding mental health problems constant.
+
+Interpreting mental health's effect is more subtle because the predictor's range 
+is 0-1. Although we see that a one-unit increase in poor mental health rate 
+gives 45 additional deaths per 100,000, it is more reasonable to divide that 
+coefficient by 100 to discuss every 1-percent increase. Thus, while holding the 
+amount of pro-gun lobbying constant, we can say that every 0.01-unit increase in 
+poor mental health rate causes an expected 0.45 deaths per 100,000 by 
+self-inflicted gunshot, or 1,521 deaths nationwide. 
+
+::: {layout-ncol=2}
+![Figure 4: Residual distribution](plots/resid_distribution.png)
+
+![Figure 5: Quantile-quantile plot](plots/qqplot.png)
+:::
+
+# Discussion
+
+In this study, we found statistically significant evidence that additional 
+pro-gun lobbying efforts cause additional suicides using firearms while holding 
+the rate of poor mental health constant. Although we built the model using only 
+$n = 19$ observations, we conducted a Shapiro-Wilk test to verify the normality 
+of our residuals, used adjusted $R^2$ instead of traditional $R^2$, and 
+constructed a quantile-quantile plot to increase confidence in our findings. 
+However, our research could have been improved in multiple ways.
+
+First, although we used several methods to deal with our small training dataset, 
+additional data would be welcome. Although most data goes back to somewhere in 
+the mid to late 1990s, RAND has only reported the proportion of suicides 
+completed with guns until 2016. Much has likely changed in this area of research 
+since 2016, and updated data from RAND or other sources would assist in 
+expanding this study to recent, especially  post-COVID-19, developments in 
+suicide and firearm legislation.
+
+Second, additional independent variables would be ideal. In this study, we focus 
+on mental health, as it is a commonly cited cause by those who oppose 
+anti-firearm legislation. For example, the CDC reports veteran status, which 
+could be an interesting expansion to our work. However, with only 19 rows of 
+data, it is difficult to justify adding additional predictors. More recent data, 
+as well as more historical data, would give us room to increase the degrees of 
+freedom of our model to include such predictors. 
+
+Additionally, replacing lobbying activity with another proxy for pro-gun 
+legislative activity could allow for state-by-state data instead of national 
+averages. Our work had to be aggregated nationally due to a lack of 
+representation in the lobbying data for each state. Still, a per-state metric 
+would lead to a dataset of over 1,000 entries (even without additional years), 
+allowing predictors and a per-state analysis of significance. Ultimately, we 
+recommend future work substitute lobbying activity for a metric with more robust 
+data from every state.
+
+# Conclusion
+
+The American gun debate shows no signs of ceasing anytime soon. However, we have 
+shown that there is reasonable doubt to the claim that America's gun violence 
+problems are caused by mental health alone. Although our result leaves room for 
+future research, there is statistically significant evidence that, even when 
+holding reported mental health status constant, pro-gun lobbying activity causes 
+deaths at an expected 3.38 deaths for each additional pro-gun special interest 
+effort. While there are philosophical aspects to the gun debate that statistics 
+can never affirm or deny, we can be reasonably confident that the specific claim 
+of mental health being the sole cause of American gun violence is not supported 
+by evidence. Although the dispute continues, we hope our humble contribution to 
+the national discussion can help advance the cause of rational, evidence-based 
+debate on this life-or-death issue.

@@ -31,6 +31,6 @@ mntl_annual <- mntl |>
 joined_data <- mntl_annual |>
   left_join(deaths) |>
   left_join(owner) |>
-  filter(year <= 2016)
+  filter(year < 2023)
 
 write_csv(joined_data, "data/total_death_data.csv")

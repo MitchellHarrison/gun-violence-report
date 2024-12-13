@@ -9,7 +9,7 @@ for (i in seq_along(file_names)) {
   data <- read_tsv(file_names[i])
   data <- data |>
     janitor::clean_names() |>
-    filter(is.na(notes)) |>
+    filter(!is.na(state)) |>
     select(year, state, population, deaths) |>
     rename(gun_suicides = "deaths")
   joined <- bind_rows(joined, data)
@@ -17,5 +17,6 @@ for (i in seq_along(file_names)) {
 
 # write data to csv
 joined |>
+  filter(!is.na(year)) |>
   arrange("year") |>
   write_csv("data/gun_suicides.csv")
