@@ -2,7 +2,10 @@
 title: "The Lethality of the American Gun Lobby"
 subtitle: "Pro-gun lobbying efforts and mental health effects on suicide by gun"
 author: "Mitchell Harrison"
-format: pdf
+format:
+  pdf:
+    figures:
+      numbered: false
 execute: 
   warning: false
   message: false
@@ -38,34 +41,352 @@ gun_groups <- lobby |>
   rename(state_id = "state") |>
   mutate(state = state.name[match(state_id, state.abb)]) |>
   select(-state_id)
+
+all_groups <- unique(gun_groups$client_name)
+anti_gun_group_ids <- c(138, 139, 140, 214:226, 238:247, 264, 303, 309, 316,
+                        326, 754, 758, 765, 770, 810, 829, 951, 965, 1108,
+                        1137, 1359, 1548)
+anti_gun_group_str <- paste(
+  "everytown", "prevent", "prevent", "stop", "safety", "gundersen",
+  "gun sense", "god before guns", "gun violence task force", "against",
+  "george gund", "students for gun legislation", "bbq", "gunn", "laura gundy",
+  "lloyd gunker", "gunter", "moms demand action", "ray pagun", "gund",
+  "city of rifle", "giffords", "illegal guns", "colorado faith", 
+  "hunters against", "students demand action", "justice", "epidemic",
+  "for gun control", "mayor", "home loan", "gunnarson", "gun free", 
+  "gun sense", "laguna", "oliver smith", "gundry", "niu school shooting",
+  "olaide", "niu mass shooting", "shooters bar",
+  sep = "|"
+)
+anti_gun_group_names <- all_groups[anti_gun_group_ids]
+
+gun_groups <- gun_groups |>
+  filter(
+    !str_detect(client_name, regex(anti_gun_group_str, ignore_case = T)),
+    !(client_name %in% anti_gun_group_names)
+  )
 ```
 
 ```{r}
 #| label: summarise-gun-data
 
 gun_group_count <- gun_groups |>
-  group_by(year) |>
-  summarise(lobbyist_positions = n())
+  group_by(year, state) |>
+  summarise(lobbyist_positions = n(), .groups = "drop")
 
 mean_death_year <- death |>
-  group_by(year) |>
+  group_by(year, state) |>
   summarise(
     population = sum(population),
     gun_suicides = sum(gun_suicides, na.rm = TRUE),
     gun_rate = mean(mean_fs_s, na.rm = TRUE),
     poor_mental_rate = mean(p_poor_mental, na.rm = TRUE)
-  ) |>
-  filter(year < 2017)
+  )
 ```
+
+```{r}
+#| label: build-model-data
+
+states <- death |>
+  filter(year >= min(gun_group_count$year)) |>
+  left_join(gun_group_count) |>
+  mutate(
+    lobbyist_positions = if_else(
+      is.na(lobbyist_positions), 
+      0, 
+      lobbyist_positions
+    ),
+    gun_suicides_per_100k = gun_suicides / (population / 100000),
+    log_positions = log(lobbyist_positions)
+  ) |>
+  left_join(mean_death_year) |>
+  select(-c(fem_fs_s, male_fs_s)) |>
+  filter(lobbyist_positions > 0)
+
+# choose state with the median gun_suicides_per_100k as baseline
+states_grouped <- states |>
+  group_by(state) |>
+  summarise(means = mean(gun_suicides_per_100k, na.rm = T))
+median_rate <- median(states_grouped$means, na.rm = T)
+baseline_state <- states_grouped |>
+  filter(means == median_rate) |>
+  pull(state)
+
+# get mean number of special interest statements per year/state
+mean_log_positions <- mean(states$log_positions)
+
+# create final dataset for modeling
+model_data <- states |>
+  mutate(
+    state = factor(
+      state, 
+      levels = c(baseline_state, sort(unique(state[state != baseline_state])))
+    ),
+    active_lobby = if_else(lobbyist_positions > 0, T, F),
+    region = case_when(
+      state %in% c("Texas", "Florida") ~ "South",
+      state %in% c("South Dakota", "Nebraska", "Kansas", 
+                   "Missouri", "Iowa") ~ "Midwest",
+      state %in% c("Wisconsin", "Illinois", "Ohio") ~ "Great Lakes",
+      state %in% c("Montana", "Colorado", "Arizona") ~ "West",
+      state %in% c("Massachusetts", "New Jersey", "Rhode Island", 
+                   "Maryland") ~ "Northeast",
+      TRUE ~ "Other"
+    )
+  ) |>
+  filter(state != "District of Columbia") |>
+  na.omit()
+```
+
+```{r}
+#| label: lobbyist-dist
+#| fig-width: 6
+#| fig-asp: 0.618
+
+lobby_plot <- model_data |>
+  ggplot(aes(x = lobbyist_positions)) +
+  geom_density(linewidth = 1.5, fill = "darkcyan", alpha = 0.5) +
+  theme_fivethirtyeight() +
+  labs(
+    x = "Number of special interest statements",
+    y = "Density",
+    title = "Distribution of special interest statements"
+  ) +
+  theme(
+    plot.background = element_rect(fill = "white"),
+    panel.background = element_rect(fill = "white"),
+    axis.title = element_text()
+  )
+
+ggsave("plots/lobby_dist_reg.png", dpi = 300, plot = lobby_plot)
+```
+
+```{r}
+#| label: lobbyist-dist-log
+#| fig-width: 6
+#| fig-asp: 0.618
+
+lobby_plot_log <- model_data |>
+  ggplot(aes(x = log_positions)) +
+  geom_density(linewidth = 1.5, fill = "darkcyan", alpha = 0.5) +
+  theme_fivethirtyeight() +
+  labs(
+    x = "Number of special interest statements (log-transformed)",
+    y = "Density",
+    title = "Log-transformed special interest statements"
+  ) +
+  theme(
+    plot.background = element_rect(fill = "white"),
+    panel.background = element_rect(fill = "white"),
+    axis.title = element_text()
+  )
+
+ggsave("plots/lobby_dist_log.png", dpi = 300, plot = lobby_plot_log)
+```
+
+```{r}
+#| label: build-models
+
+unweighted_model <- lm(
+  gun_suicides_per_100k ~ log_positions + p_poor_mental, 
+  data = model_data
+)
+
+resid_data <- model_data |>
+  mutate(
+    preds = predict(unweighted_model, new_data = model_data),
+    resids = gun_suicides_per_100k - preds,
+    weights = 1 / abs(resids)^(1/2)
+  )
+
+updated_model <- lm(
+  gun_suicides_per_100k ~ log_positions + p_poor_mental + state, 
+  data = resid_data,
+  weights = weights
+)
+
+updated_resid_data <- resid_data |>
+  mutate(
+    preds = predict(updated_model, new_data = model_data),
+    resids = gun_suicides_per_100k - preds
+  )
+```
+
+```{r}
+#| label: plot-per-state-variance
+#| fig-width: 6
+#| fig-asp: 0.618
+
+per_state_variance <- resid_data |>
+  ggplot(aes(y = state, x = resids)) +
+  geom_boxplot(fill = "darkcyan", alpha = 0.8) +
+  theme_fivethirtyeight() +
+  labs(
+    x = "Residuals",
+    y = element_blank(),
+    title = "OLS Residuals Distribution by State",
+    subtitle = "Variance differs widely between states"
+  ) +
+  theme(
+    plot.background = element_rect(fill = "white"),
+    panel.background = element_rect(fill = "white"),
+    panel.grid.major.y = element_blank(),
+    axis.title.x = element_text()
+  )
+
+ggsave("plots/per_state_variance.png", dpi = 300, plot = per_state_variance)
+```
+
+```{r}
+#| label: unweighted-resid-plot
+#| fig-width: 6
+#| fig-asp: 0.618
+
+bp_unweighted <- round(lmtest::bptest(unweighted_model)$p.value, 3)
+
+unw_resid_plot <- resid_data |>
+  ggplot(aes(x = preds, y = resids)) +
+  geom_point(color = "darkcyan", size = 2) +
+  geom_hline(yintercept = 0, color = "darkorange", linewidth = 1) +
+  theme_fivethirtyeight() +
+  labs(
+    x = "Predicted Value",
+    y = "Residual",
+    title = "Fit vs. Residual Plot: OLS Model",
+    subtitle = paste0("Breusch-Pagan score = ", bp_unweighted) 
+  ) +
+  theme(
+    axis.title = element_text(),
+    panel.background = element_rect(fill = "white"),
+    plot.background = element_rect(fill = "white")
+  )
+
+ggsave("plots/unweighted_resids.png", dpi = 300, plot = unw_resid_plot)
+```
+
+```{r}
+#| label: weighted-resid-plot
+#| fig-width: 6
+#| fig-asp: 0.618
+
+bp_weighted <- round(lmtest::bptest(updated_model)$p.value, 3)
+
+w_resid_plot <- updated_resid_data |>
+  ggplot(aes(x = preds, y = resids)) +
+  geom_point(color = "darkcyan", size = 2) +
+  geom_hline(yintercept = 0, color = "darkorange", linewidth = 1) +
+  theme_fivethirtyeight() +
+  labs(
+    x = "Predicted Value",
+    y = "Residual",
+    title = "Fit vs. Residual Plot: Weighted Model",
+    subtitle = paste0("Breusch-Pagan score = ", bp_weighted) 
+  ) +
+  theme(
+    axis.title = element_text(),
+    panel.background = element_rect(fill = "white"),
+    plot.background = element_rect(fill = "white")
+  )
+
+ggsave("plots/weighted_resids.png", dpi = 300, plot = w_resid_plot)
+```
+
+```{r}
+#| label: plot-qqplot
+#| fig-width: 6
+#| fig-asp: 0.618
+
+qqplot <- updated_resid_data |>
+  ggplot(aes(sample = resids)) +
+  stat_qq_line(color = "darkorange", linewidth = 1) +
+  stat_qq(size = 4, color = "darkcyan") +
+  labs(
+    x = "Theoretical Quantiles",
+    y = "Observed Quantiles",
+    title = "Quantile-Quantile Plot (Weighted Model)"
+  ) +
+  theme_fivethirtyeight() +
+  theme(
+    plot.background = element_rect(fill = "white"),
+    panel.background = element_rect(fill = "white"),
+    axis.title = element_text()
+  )
+
+ggsave("plots/qqplot.png", dpi = 300, plot = qqplot)
+```
+
+```{r}
+#| label: full-residual-distribution
+#| fig-width: 6
+#| fig-asp: 0.618
+
+no_outlier <- updated_resid_data |>
+  filter(abs(resids) < 2.2)
+shapiro_results <- shapiro.test(no_outlier$resids)
+p_shapiro <- round(shapiro_results$p.value, 4)
+
+resid_dist <- updated_resid_data |>
+  filter(abs(resids) < 2) |>
+  ggplot(aes(x = resids)) +
+  geom_histogram(
+    aes(y = after_stat(density)), 
+    fill = "darkcyan", 
+    color = "black",
+    bins = 15
+  ) +
+  geom_density(color = "darkorange", linewidth = 2) +
+  theme_fivethirtyeight() +
+  labs(
+    x = "Residuals",
+    y = "Density",
+    title = "Model Residual Distribution",
+    subtitle = paste0("Outlier removed\nShapiro-Wilk score = ", p_shapiro)
+  ) +
+  theme(
+    plot.background = element_rect(fill = "white"),
+    panel.background = element_rect(fill = "white"),
+    axis.title = element_text()
+  )
+
+ggsave("plots/resid_distribution.png", dpi = 300, plot = resid_dist)
+```
+
+```{r}
+#| label: table-no-states
+
+tab_no_states <- tidy(updated_model) |>
+  filter(!str_detect(term, "state"))
+
+tab_no_states$term <- c("Intercept", "log(Positions)", 
+                        "Poor mental health proportion")
+colnames(tab_no_states) <- c("Variable", "Estimate", "Std. Error", "Statistic",
+                             "P-value")
+
+tab_no_states |>
+  gt() |>
+  tab_header(md("**Weighted model output (no states listed)**")) |>
+  fmt_number(decimals = 3) |>
+  text_transform(
+    locations = cells_body(),
+    fn = function(x) {
+      case_when(
+        x < 0.001 & x != 0 ~ "<0.001",
+        TRUE ~ as.character(x)
+      )
+    }
+  ) |>
+  gtsave("tables/weighted_model_table.png")
+```
+
 
 # Introduction
 
-Gun violence continues to be a staple of American politics, especially following
+Gun violence continues to be a staple of American politics, especially following 
 a series of high-profile assassination attempts on President-Elect Trump and the
 recent murder of UnitedHealthcare CEO Brian Thompson. Americans in opposition to
 federal gun ownership restrictions often cite mental health as the reason for 
 America's gun violence epidemic. In contrast, supporters of gun restrictions 
-regularly blame America's comparatively loose regulatory environment and special
+regularly blame America's comparatively loose regulatory environment and special 
 interest group involvement for the violence.
 
 According to the Centers for Disease Control and Prevention (CDC), suicide by 
@@ -78,6 +399,8 @@ We aggregate over ten million responses to CDC health surveys, three million
 special interest group reports, and suicide by firearm rates for all 50 states. 
 These data are then used to build a multiple linear regression model to control 
 for the impact of lobbying efforts and mental health on rates of suicide by gun.
+Therefore, our research question is: *Does increased pro-gun special interest* 
+*activity lead to additional suicide by gun, controlling for mental health?*
 
 ## The Data
 
@@ -99,8 +422,8 @@ these responses as binary: "Poor" or "Good" mental health. The CDC defines 15 or
 more days of poor mental health in a 30-day period as concerning, so we encode 
 responses of 15 or greater as "Poor" and others as "Good."
 
-The CDC also provides absolute number and per-capita suicide data by state through
-their [CDC WONDER](https://wonder.cdc.gov/cmf-icd10.html) platform. 
+The CDC also provides absolute number and per-capita suicide data by state 
+through their [CDC WONDER](https://wonder.cdc.gov/cmf-icd10.html) platform. 
 Per-state proportions of suicides that were completed with firearms were 
 compiled by the [RAND Corporation](https://www.rand.org/pubs/tools/TL354.html), 
 a non-profit, non-partisan think tank that tracks and reports on several 
@@ -116,346 +439,142 @@ filters built by hand from group names listed on
 [OpenSecrets](https://www.opensecrets.org/federal-lobbying/industries/lobbyists?cycle=2024&id=Q13), 
 the website of the eponymous non-profit organization that tracks lobbying groups 
 and campaign finance in Washington, DC. We aggregate firearm-related special 
-interest group activity by year to include in the model.
+interest group activity by year and state. Once gun-related groups were 
+compiled, we manually reviewed the 1,168 groups to remove any anti-firearm 
+special interest groups from the data. Note that manual review is prone to human 
+error. Further details of these limitations are in the discussion section of 
+this article.
 
-We aggregate all of these data (unique interest activity, suicide count, 
-gun-specific suicide rate, reported mental health) into a single dataset that 
-we use to build our model.
+Most year/state combinations have no special interest group representation 
+(i.e., the number of reported special interest statements is 0). Initially, we 
+attempted to include these zero values but ran into issues with 
+heteroscedasticity. Ultimately, we maintained homoscedasticity by removing rows 
+with no special interest involvement. This reduction in data lessened the scope 
+of our findings to states in which the pro-gun lobby has been active since 1997 
+but allowed us to construct a more trustworthy model. The resulting dataset is 
+186 observations in which a pro-gun group was active in a given state and year.
 
 # Methodology
 
-Each row in our final dataset represents a single year as a national aggregate. 
-Although health and firearm data is aggregated by state, lobbying efforts occur 
-in fewer than half of all states, so we simply take the total number of lobbying
-efforts nationwide to avoid losing the majority of states that do not have 
-state-level lobbying efforts. Because inter-state gun transfers are common
-([Roberts et al., 2024](https://pmc.ncbi.nlm.nih.gov/articles/PMC11004838/)), 
-taking a national aggregate is justified, even when many states are not 
-represented.
+In this study, we first construct an ordinary least squares (OLS) model using 
+state, the proportion of poor mental health, and the number of special interest 
+statements to predict the number of gun deaths from self-inflicted gunshot 
+wounds per 100,000 citizens. However, Figure 1 shows that the number of special 
+interest statements in our dataset is power-law distributed. Thus, we perform a 
+log transformation to arrive at the predictor that we ultimately use in our 
+model. Figure 2 shows the distribution of the log-transformed number of special 
+interest statements used in our model. In all cases, we will assume an 
+$\alpha=0.05$ level of significance.
 
-Since the resulting dataset has one row per year, we are left with only 19 
-observations. Although tens of millions of observations were combined to arrive 
-at the data, we must take some special consideration when building a regression 
-model with fewer than 30 observations.
+::: {layout-ncol=2}
+![Figure 1](plots/lobby_dist_reg.png)
 
-First, to avoid over-fitting, we use only use two predictors. A common heuristic
-in statistics is that the degrees of freedom should be no more than 
-$\frac{n}{10}$, or two predictors in this case. Initially, we chose three 
-predictors, but after observing a strong negative correlation between two of 
-them, we ultimately removed one and arrived at two predictors: lobbyist activity
-count and the proportion of people reporting poor mental health. (See the 
-results section for additional detail).
+![Figure 2](plots/lobby_dist_log.png)
+:::
 
-To test the validity of our findings (especially with $n=19$ observations), we 
-also conduct a Shapiro-Wilk test on our residuals to verify the assumption of 
-residual normality that linear regression requires. We further verify our 
-results by constructing a quantile-quantile plot and discussing its content. 
-Finally, we will use adjusted $R^2$ instead of traditional $R^2$ to discuss the 
-model, as adding predictors will always increase $R^2$, even if those predictors 
-are not truly meaningful. This problem is more pronounced in models trained with
-smaller datasets. Using adjusted $R^2$ will help us combat that problem.
+We evaluated the assumption of homoscedasticity (i.e., constant variance of 
+residuals) using a Breusch-Pagan (BP) test on our OLS model. However, with a 
+p-value of `r bp_unweighted`, our BP test showed a violation of 
+homoscedasticity. Figure 3 shows the distribution of residuals by state for our 
+OLS model. It is trivial to observe that residual variance differs widely 
+between states. To adjust for these changes in residual variance, we construct a 
+weighted linear regression model using weights derived from the following 
+equation:
+$$
+w_i = \frac{1}{\sqrt{\left|r_i\right|}}
+$$
+
+
+where $r_i$ is the residual for observation $i$.
+
+![Per-state residuals](plots/per_state_variance.png){width=80%}
+
+In addition to adjusting weights based on initial residuals, we add another 
+predictor, state, to create a weighted regression model. State was withheld 
+from the OLS model due to its addition causing inferior weights to be produced.
 
 # Results
 
-In our multiple linear regression model, our outcome variable is the number of 
-suicides by gun per 100,000 citizens of the United States. Initially, we 
-constructed our model with three predictors: lobbying activity, the proportion 
-of poor mental health, and the mean proportion of all suicides that were 
-completed with firearms. Using three predictors for $n=19$ observations violates 
-our heuristic discussed in the methodology section (using $\frac{n}{10}$ degrees 
-of freedom), which we will discuss below. Our three-predictor model is shown 
-below:
-
-```{r}
-#| label: build-the-model-3-preds
-
-model_data <- gun_group_count |>
-  left_join(mean_death_year) |>
-  mutate(gun_suicides_per_100k = gun_suicides / (population / 100000)) |>
-  select(-gun_suicides) |>
-  filter(year < 2017)
-
-model_spec <- linear_reg() |>
-  set_engine("lm")
-
-model1 <- model_spec |>
-  fit(
-    gun_suicides_per_100k ~ lobbyist_positions + poor_mental_rate + gun_rate,
-    data = model_data
-  )
-
-summary1 <- tidy(model1) 
-summary1$term <- c(
-  "Intercept",
-  "Number of lobbying activities",
-  "Rate of poor mental health",
-  "Rate of suicides by gun"
-)
-colnames(summary1) <- c("Variable", "Estimate", "Std. Error", "Statistic", 
-                        "P-value")
-
-summary1 |>
-  gt() |>
-  fmt_number(decimals = 3) |>
-  tab_header(md("**Model results (three predictors)**")) |>
-  text_transform(
-    locations = cells_body(),
-    fn = function(x) {
-      case_when(
-        x < 0.001 & x != 0 ~ "<0.001",
-        TRUE ~ as.character(x)
-      )
-    }
-  ) |>
-  gtsave("tables/model1_results.png")
-```
-
-to test the validity of our findings, especially with few observations, we 
-calculate the pearson coefficients for our predictors. for our use case, we will 
-consider correlations with an absolute value greater than 0.8 too high for 
-combined use in our model. figure 2 shows the pearson coefficients of our three 
-predictors:
-
-```{r}
-#| label: pearson-correlation-of-predictors
-#| fig-cap: "figure 2: pearson coefficients (three-variable model)"
-
-pearson_cor <- cor(
-  select(model_data, -c(year, gun_suicides_per_100k, population))
-)
-
-pred_names <- c(
-  "Lobbying",
-  "Gun Suicide",
-  "Mental Health"
-)
-
-pearson <- tibble(data.frame(pearson_cor)) |>
-  mutate(var = pred_names) |>
-  select(var, lobbyist_positions, gun_rate, poor_mental_rate)
-colnames(pearson) <- c("x", pred_names)
-
-pearson |>
-  gt() |>
-  fmt_number(decimals = 3) |>
-  cols_label(x = "") |>
-  tab_header(md("**Pearson Coefficients**")) |>
-  tab_style(
-    style = list(
-      cell_fill(color = "lightgray"),
-      cell_text(weight = "bold")
-    ),
-    locations = cells_body(col = 3, rows = 3)
-  ) |>
-  tab_style(
-    style = list(
-      cell_fill(color = "lightgray"),
-      cell_text(weight = "bold")
-    ),
-    locations = cells_body(col = 4, rows = 2)
-  ) |>
-  gtsave("tables/model1_pearson.png")
-```
+In both the OLS and weighted models, we use state, the proportion of poor mental
+health reports, and the log-transformed number of special interest statements to
+predict the number of gun deaths per 100,000 citizens in a state. Figures 4 and 
+5 show the predicted values, residuals, and BP test results for both the 
+unweighted and weighted models. We observe a much higher (i.e., improved) BP 
+score for our weighted model, although visually, the performance benefit is less
+apparent.
 
 ::: {layout-ncol=2}
-![Figure 1: Model results](tables/model1_results.png)
+![Figure 4](plots/unweighted_resids.png)
 
-![Figure 2: Pearson coefficients](tables/model1_pearson.png){width=90%}
+![Figure 5](plots/weighted_resids.png)
 :::
 
-To avoid potential multicollinearity in our model and to get closer to our 
-$\frac{n}{10}$ degrees of freedom heuristic, we remove the proportion of 
-suicides by gun from the model. Because we are specifically interested in the 
-effects of mental health and lobbying activities, eliminating mental health 
-reports from our model to reduce the probability of multicollinearity would be 
-unwise. Thus, we are left with our final two predictors and a new model. The 
-results of that model are shown in Figure 3.
-
-```{r}
-#| label: build-the-model-2-preds
-
-model_spec <- linear_reg() |>
-  set_engine("lm")
-
-model2 <- model_spec |>
-  fit(
-    gun_suicides_per_100k ~ lobbyist_positions + poor_mental_rate,
-    data = model_data
-  )
-
-summary2 <- tidy(model2) 
-summary2$term <- c(
-  "Intercept",
-  "Number of Lobbying Activities",
-  "Rate of Poor Mental Health"
-)
-colnames(summary2) <- c("Variable", "Estimate", "Std. Error", "Statistic", 
-                        "P-value")
-
-summary2 |>
-  gt() |> 
-  fmt_number(decimals = 3) |>
-  tab_header(md("**Model Results (two predictors)**")) |>
-  text_transform(
-    locations = cells_body(),
-    fn = function(x) {
-      case_when(
-        x < 0.001 & x != 0 ~ "<0.001",
-        TRUE ~ as.character(x)
-      )
-    }
-  ) |>
-  gtsave("tables/model2_results.png")
-```
-
-![Model results](tables/model2_results.png){width=70%}
-
-```{r}
-#| label: plot-qqplot
-#| fig-height: 5
-#| fig-asp: 0.618
-
-resid_data <- model_data |>
-  select(gun_suicides_per_100k) |>
-  mutate(
-    preds = predict(model2, new_data = model_data)$.pred,
-    resids = gun_suicides_per_100k - preds
-  )
-
-qqplot <- resid_data |>
-  ggplot(aes(sample = resids)) +
-  stat_qq_line(color = "darkorange", linewidth = 1) +
-  stat_qq(size = 4, color = "darkcyan") +
-  labs(
-    x = "Theoretical Quantiles",
-    y = "Observed Quantiles",
-    title = "Q-Q Plot of Residuals"
-  ) +
-  theme_fivethirtyeight() +
-  theme(
-    plot.background = element_rect(fill = "white"),
-    panel.background = element_rect(fill = "white"),
-    axis.title = element_text()
-  )
-
-ggsave("plots/qqplot.png", dpi = 300, plot = qqplot)
-```
-
-```{r}
-#| label: residual-distribution
-#| fig-width: 6
-#| fig-asp: 0.618
-
-resid_dist <- resid_data |>
-  ggplot(aes(x = resids)) +
-  geom_histogram(
-    aes(y = after_stat(density)), 
-    fill = "darkcyan", 
-    color = "black",
-    bins = 15
-  ) +
-  geom_density(color = "darkorange", linewidth = 2) +
-  theme_fivethirtyeight() +
-  labs(
-    x = "Residuals",
-    y = "Density",
-    title = "Model Residual Distribution",
-  ) +
-  theme(
-    plot.background = element_rect(fill = "white"),
-    panel.background = element_rect(fill = "white"),
-    axis.title = element_text()
-  )
-
-ggsave("plots/resid_distribution.png", dpi = 300, plot = resid_dist)
-```
-
-```{r}
-#| label: residual-shapiro-test
-
-shapiro_results <- shapiro.test(resid_data$resids)
-p_shapiro <- round(shapiro_results$p.value, 2)
-```
-
-```{r}
-#| label: get-model-r2-value
-
-model_r2 <- round(summary(model2$fit)$adj.r.squared, 2)
-```
-
-Both of our predictors are statistically significant at the $\alpha = 0.05$ 
-significance level. However, the amount of lobbyist activity has a substantially 
-lower p-value ($p < 0.001$), and our model has an adjusted $R^2$ of 
-`r model_r2`. However, because of our small dataset, further investigation is 
-necessary to confirm our findings. First, we should verify the residual 
-normality assumption. Figure 4 shows the distribution of our residuals, but with 
-$n=19$ residuals, it is difficult to confirm their normality visually. Instead, 
-we can conduct a Shapiro-Wilk test to test the probability that our residuals 
-come from a normal distribution.
-
-In a Shapiro-Wilk test, our null hypothesis is that our data *is* normally 
-distributed. As such, a p-value of less than 0.05 means that our residual 
-normality assumption is violated. However, with a p-value of `r p_shapiro`, our 
-residuals are likely to be normally distributed. We construct a 
-quantile-quantile plot in Figure 5 to further verify our performance. With each 
-point closely approaching the mathematical ideal, Figure 5 gives additional 
-confidence to our findings.
-
-While holding the proportion of the population reporting poor mental health 
-constant, every additional pro-gun lobbyist effort adds an expected 0.001 deaths 
-per 100,000 people. The United States population is around 338,000,000 people. 
-Therefore, an expected increase of 0.001 deaths per 100,000 people means each 
-additional lobbying effort produces an expected 3.38 additional deaths while 
-holding mental health problems constant.
-
-Interpreting mental health's effect is more subtle because the predictor's range 
-is 0-1. Although we see that a one-unit increase in poor mental health rate 
-gives 45 additional deaths per 100,000, it is more reasonable to divide that 
-coefficient by 100 to discuss every 1-percent increase. Thus, while holding the 
-amount of pro-gun lobbying constant, we can say that every 0.01-unit increase in 
-poor mental health rate causes an expected 0.45 deaths per 100,000 by 
-self-inflicted gunshot, or 1,521 deaths nationwide. 
+To verify the normality of our residuals, we conduct a Shapiro-Wilk test. A 
+significant p-value from a Shapiro-Wilk test (at the $\alpha=0.05$ level) was
+produced by the Shapiro-Wilk test, which rejects the null hypothesis that our 
+residuals come from a normal distribution. However, if we remove a single 
+residual (the largest one), our Shapiro-Wilk p-value becomes 0.8. Therefore, we 
+can be confident in the normality of our residuals with the exception of a 
+single outlier. Figure 6 shows the result of removing that outlier, and Figure 7 
+further verifies our model's normality using a quantile-quantile plot. 
 
 ::: {layout-ncol=2}
-![Figure 4: Residual distribution](plots/resid_distribution.png)
+![Figure 6](plots/resid_distribution.png)
 
-![Figure 5: Quantile-quantile plot](plots/qqplot.png)
+![Figure 7](plots/qqplot.png)
 :::
+
+Now that we have verified the results of our model, we can display its results. 
+Figure 8 contains the weighted regression model output. Recall that states are 
+not included here but are corrected for. Results for all states in the dataset 
+are included in the appendix.
+
+![Model output](tables/weighted_model_table.png){width=70%}
+
+Thus, our final model is given by the equation:
+$$
+y_i = 5.884 + 0.18ln(x_{1i}) + \beta_2x_{2i} + \epsilon
+$$
+
+where $x_1$ is the number of pro-gun statements in a state, $x_2$ state in
+question, $\beta_3$ per-state coefficient (each can be found in the appendix), 
+and $\epsilon$ is an error term.
+
+We observe from our model that, holding mental health and state constant, every
+$e$-fold increase (i.e., $\approx 2.72$-fold) in the number of pro-gun special
+interest statements, we expect an additional 0.18 deaths per 100,000 citizens in
+that state ($p = 0.03$). Also importantly, with a p-value of 0.89, mental health 
+does not show a statistically significant impact on per-capita rate of suicide 
+by firearm while holding state and special interest activity constant.
 
 # Discussion
 
-In this study, we found statistically significant evidence that additional 
-pro-gun lobbying efforts cause additional suicides using firearms while holding 
-the rate of poor mental health constant. Although we built the model using only 
-$n = 19$ observations, we conducted a Shapiro-Wilk test to verify the normality 
-of our residuals, used adjusted $R^2$ instead of traditional $R^2$, and 
-constructed a quantile-quantile plot to increase confidence in our findings. 
-However, our research could have been improved in multiple ways.
+In this study, we found statistically significant evidence that, holding state 
+of residence and self-reported mental health constant, increasing pro-gun 
+special interest group activity leads to additional suicide by gun. Perhaps 
+equally importantly, we have shown that, while holding pro-gun special interest 
+activity constant, self-reported mental health rates do not show a statistically
+significant impact on the rate of suicide by gun.
 
-First, although we used several methods to deal with our small training dataset, 
-additional data would be welcome. Although most data goes back to somewhere in 
-the mid to late 1990s, RAND has only reported the proportion of suicides 
-completed with guns until 2016. Much has likely changed in this area of research 
-since 2016, and updated data from RAND or other sources would assist in 
-expanding this study to recent, especially  post-COVID-19, developments in 
-suicide and firearm legislation.
+However, there are some crucial limitations and room for further research. 
+First, only 17 states were ultimately included in the dataset used to train the 
+model. Those 17 states were the ones in which pro-gun special interest activity 
+was tracked by Hall et al. It is possible that using a different metric for 
+pro-gun activism (pro-gun social media pages, pro-gun protests, etc.) would 
+result in more robust data across all states, leading to a much larger dataset 
+and more room for additional predictors.
 
-Second, additional independent variables would be ideal. In this study, we focus 
-on mental health, as it is a commonly cited cause by those who oppose 
-anti-firearm legislation. For example, the CDC reports veteran status, which 
-could be an interesting expansion to our work. However, with only 19 rows of 
-data, it is difficult to justify adding additional predictors. More recent data, 
-as well as more historical data, would give us room to increase the degrees of 
-freedom of our model to include such predictors. 
+Second, pro- and anti-gun groups were tagged by hand. We developed custom 
+regular expressions using manual research, but it is possible that some pro-gun 
+groups were removed and some anti-gun groups remained in the dataset. A dataset 
+tagged with "pro-gun" and "anti-gun" when the dataset was created would help 
+remove potential human error during filtering.
 
-Additionally, replacing lobbying activity with another proxy for pro-gun 
-legislative activity could allow for state-by-state data instead of national 
-averages. Our work had to be aggregated nationally due to a lack of 
-representation in the lobbying data for each state. Still, a per-state metric 
-would lead to a dataset of over 1,000 entries (even without additional years), 
-allowing predictors and a per-state analysis of significance. Ultimately, we 
-recommend future work substitute lobbying activity for a metric with more robust 
-data from every state.
+Finally, although our results were statistically significant and passed model 
+assumption checks, we did need to remove an outlier residual to pass our 
+Shapiro-Wilk test. There may be additional covariates for which a broader 
+dataset may be able to correct to strengthen our confidence in our model 
+further.
 
 # Conclusion
 
@@ -471,3 +590,41 @@ of mental health being the sole cause of American gun violence is not supported
 by evidence. Although the dispute continues, we hope our humble contribution to 
 the national discussion can help advance the cause of rational, evidence-based 
 debate on this life-or-death issue.
+
+{{< pagebreak >}}
+
+# Appendix
+Below is the total result table, including all 17 states in the dataset. To
+select the baseline state, we took the average of all states' suicide by gun per
+100,000 residence rates. The median of those weights served as the baseline. In
+this case, the baseline state was Iowa.
+
+```{r}
+#| label: full-model-table
+
+full_table <- tidy(updated_model) |>
+  mutate(term = str_replace(term, "state", ""))
+
+full_table$term[1:3] <- c("Intercept", "log(Positions)",
+                          "Poor mental health proportion")
+state_p_vals <- full_table$p.value[-(1:3)]
+p_adjusted <- p.adjust(state_p_vals, method = "BH")
+full_table$p.value[-(1:3)] <- p_adjusted
+
+full_table |>
+  gt() |>
+  fmt_number(decimals = 3) |>
+  text_transform(
+    locations = cells_body(),
+    fn = function(x) {
+      case_when(
+        x < 0.001 & x != 0 ~ "<0.001",
+        TRUE ~ as.character(x)
+      )
+    }
+  ) |>
+  tab_header(md("**Full model results**")) |>
+  gtsave("tables/full_model_w_states.png")
+```
+
+![Full model results](tables/full_model_w_states.png){width=70%}

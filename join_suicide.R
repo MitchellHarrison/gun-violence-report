@@ -6,12 +6,10 @@ joined <- tibble()
 
 # combine all mental health data into a single dataset
 for (i in seq_along(file_names)) {
-  data <- read_tsv(file_names[i])
-  data <- data |>
+  data <- read_tsv(file_names[i]) |>
     janitor::clean_names() |>
-    filter(!is.na(state)) |>
-    select(year, state, population, deaths) |>
-    rename(gun_suicides = "deaths")
+    group_by(year, state) |>
+    summarise(gun_suicides = sum(deaths), population = first(population))
   joined <- bind_rows(joined, data)
 }
 
