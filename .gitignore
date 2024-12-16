@@ -9,3 +9,5 @@
 *.xlsx
 *.txt
 *.csv
+
+!total_death_data.csv
