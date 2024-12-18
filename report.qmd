@@ -1,11 +1,13 @@
 ---
 title: "The Lethality of the American Gun Lobby"
 subtitle: "Pro-gun lobbying efforts and mental health effects on suicide by gun"
-author: "Mitchell Harrison"
+#author: "Mitchell Harrison"
+bibliography: citations.bibtex
 format:
   pdf:
     figures:
       numbered: false
+    fig-cap: false
 execute: 
   warning: false
   message: false
@@ -17,62 +19,15 @@ execute:
 
 library(ggthemes)
 library(gt)
+library(patchwork)
 library(tidymodels)
 library(tidyverse)
 
 set.seed(440)
 
 death <- read_csv("data/total_death_data.csv")
-lobby <- arrow::read_parquet("data/lobbyists.parquet")
 
-# these regex filters were created manually by visiting the OpenSecrets
-# website's catalog of gun lobbying groups here:
-# https://www.opensecrets.org/federal-lobbying/industries/lobbyists?cycle=2024&id=Q13
-
-gun_filter <- paste(
-  "gun", "rifle", "safari club", "shoot", "crockett club", 
-  "bear arms", "firearm",
-  sep = "|"
-)
-
-gun_groups <- lobby |>
-  filter(str_detect(client_name, regex(gun_filter, ignore_case = TRUE))) |>
-  select(year, client_name, position, state) |>
-  rename(state_id = "state") |>
-  mutate(state = state.name[match(state_id, state.abb)]) |>
-  select(-state_id)
-
-all_groups <- unique(gun_groups$client_name)
-anti_gun_group_ids <- c(138, 139, 140, 214:226, 238:247, 264, 303, 309, 316,
-                        326, 754, 758, 765, 770, 810, 829, 951, 965, 1108,
-                        1137, 1359, 1548)
-anti_gun_group_str <- paste(
-  "everytown", "prevent", "prevent", "stop", "safety", "gundersen",
-  "gun sense", "god before guns", "gun violence task force", "against",
-  "george gund", "students for gun legislation", "bbq", "gunn", "laura gundy",
-  "lloyd gunker", "gunter", "moms demand action", "ray pagun", "gund",
-  "city of rifle", "giffords", "illegal guns", "colorado faith", 
-  "hunters against", "students demand action", "justice", "epidemic",
-  "for gun control", "mayor", "home loan", "gunnarson", "gun free", 
-  "gun sense", "laguna", "oliver smith", "gundry", "niu school shooting",
-  "olaide", "niu mass shooting", "shooters bar",
-  sep = "|"
-)
-anti_gun_group_names <- all_groups[anti_gun_group_ids]
-
-gun_groups <- gun_groups |>
-  filter(
-    !str_detect(client_name, regex(anti_gun_group_str, ignore_case = T)),
-    !(client_name %in% anti_gun_group_names)
-  )
-```
-
-```{r}
-#| label: summarise-gun-data
-
-gun_group_count <- gun_groups |>
-  group_by(year, state) |>
-  summarise(lobbyist_positions = n(), .groups = "drop")
+gun_group_count <- read_csv("data/gun_interest.csv")
 
 mean_death_year <- death |>
   group_by(year, state) |>
@@ -140,7 +95,7 @@ model_data <- states |>
 
 ```{r}
 #| label: lobbyist-dist
-#| fig-width: 6
+#| fig-width: 7
 #| fig-asp: 0.618
 
 lobby_plot <- model_data |>
@@ -163,7 +118,7 @@ ggsave("plots/lobby_dist_reg.png", dpi = 300, plot = lobby_plot)
 
 ```{r}
 #| label: lobbyist-dist-log
-#| fig-width: 6
+#| fig-width: 7
 #| fig-asp: 0.618
 
 lobby_plot_log <- model_data |>
@@ -214,7 +169,7 @@ updated_resid_data <- resid_data |>
 
 ```{r}
 #| label: plot-per-state-variance
-#| fig-width: 6
+#| fig-width: 7
 #| fig-asp: 0.618
 
 per_state_variance <- resid_data |>
@@ -239,7 +194,7 @@ ggsave("plots/per_state_variance.png", dpi = 300, plot = per_state_variance)
 
 ```{r}
 #| label: unweighted-resid-plot
-#| fig-width: 6
+#| fig-width: 7
 #| fig-asp: 0.618
 
 bp_unweighted <- round(lmtest::bptest(unweighted_model)$p.value, 3)
@@ -266,7 +221,7 @@ ggsave("plots/unweighted_resids.png", dpi = 300, plot = unw_resid_plot)
 
 ```{r}
 #| label: weighted-resid-plot
-#| fig-width: 6
+#| fig-width: 7
 #| fig-asp: 0.618
 
 bp_weighted <- round(lmtest::bptest(updated_model)$p.value, 3)
@@ -293,7 +248,7 @@ ggsave("plots/weighted_resids.png", dpi = 300, plot = w_resid_plot)
 
 ```{r}
 #| label: plot-qqplot
-#| fig-width: 6
+#| fig-width: 7
 #| fig-asp: 0.618
 
 qqplot <- updated_resid_data |>
@@ -317,7 +272,7 @@ ggsave("plots/qqplot.png", dpi = 300, plot = qqplot)
 
 ```{r}
 #| label: full-residual-distribution
-#| fig-width: 6
+#| fig-width: 7
 #| fig-asp: 0.618
 
 no_outlier <- updated_resid_data |>
@@ -349,6 +304,100 @@ resid_dist <- updated_resid_data |>
   )
 
 ggsave("plots/resid_distribution.png", dpi = 300, plot = resid_dist)
+```
+
+```{r}
+#| label: outlier-visualization
+#| fig-width: 10
+#| fig-asp: 0.618
+
+outlier <- updated_resid_data |>
+  filter(abs(resids) == max(abs(resids)))
+delta <- outlier$gun_suicides_per_100k - outlier$preds
+
+outlier_mental <- updated_resid_data |>
+  mutate(
+    outlier_state = if_else(
+      state == outlier$state, 
+      outlier$state, 
+      "Other"
+    )
+  ) |>
+  select(outlier_state, p_poor_mental, log_positions) |>
+  mutate(color = if_else(outlier_state == "Other", "darkcyan", "darkorange")) |>
+  ggplot(aes(y = p_poor_mental, x = outlier_state)) +
+  scale_fill_identity() +
+  geom_hline(
+    yintercept = outlier$p_poor_mental, 
+    linewidth = 1,
+    linetype = "dashed",
+    color = "darkorange"
+  ) +
+  geom_boxplot(width = 0.3, fill = "darkcyan") +
+  annotate(
+    geom = "text",
+    label = "Model outlier",
+    fontface = "bold",
+    color = "darkorange",
+    x = 1.6,
+    y = 0.113
+  ) +
+  theme_fivethirtyeight() +
+  labs(y = "Proportion of poor mental health") +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    plot.background = element_rect(fill = "white"),
+    axis.title.y = element_text(),
+    plot.title = element_blank()
+  )
+
+outlier_lobby <- updated_resid_data |>
+  mutate(
+    outlier_state = if_else(
+      state == outlier$state, 
+      outlier$state, 
+      "Other"
+    )
+  ) |>
+  select(outlier_state, p_poor_mental, log_positions) |>
+  mutate(color = if_else(outlier_state == "Other", "darkcyan", "darkorange")) |>
+  ggplot(aes(y = log_positions, x = outlier_state)) +
+  scale_fill_identity() +
+  geom_hline(
+    yintercept = outlier$p_poor_mental, 
+    linewidth = 1,
+    linetype = "dashed",
+    color = "darkorange"
+  ) +
+  geom_boxplot(width = 0.3, fill = "darkcyan") +
+  annotate(
+    geom = "text",
+    label = "Model outlier",
+    fontface = "bold",
+    color = "darkorange",
+    x = 1.5,
+    y = 0.4
+  ) +
+  theme_fivethirtyeight() +
+  labs(y = "Special interest statements\n(log-transformed)", title = element_blank()) +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    plot.background = element_rect(fill = "white"),
+    axis.title.y = element_text(),
+    plot.title = element_blank()
+  )
+
+outlier_plot <- outlier_mental + outlier_lobby + plot_annotation(
+  title = "Model residual outlier exploration",
+  subtitle = paste(
+    "Outlier shows wide disparity between mental health and special interest",
+    "activity,\neven within its own state (Missouri)."
+  ),
+  theme = theme_fivethirtyeight() +
+    theme(plot.background = element_rect(fill = "white"))
+)
+
+ggsave("plots/outlier_exploration.png", plot = outlier_plot)
 ```
 
 ```{r}
@@ -389,6 +438,19 @@ America's gun violence epidemic. In contrast, supporters of gun restrictions
 regularly blame America's comparatively loose regulatory environment and special 
 interest group involvement for the violence.
 
+In the United States, injury and death by firearms are persistent problems. 
+Although adults aged 25-44 are the most common victims of all firearm injuries 
+[@Kalesan_2021], little research exists on the relationship between political 
+activity and suicide by firearm. Research has shown an improvement in rates of 
+youth suicide by firearm after enacting youth-targeted anti-gun legislation 
+[@Kappelman_2021]. Literature also exists investigating the relationship between 
+firearm availability and per-state suicide rates [@Kposowa_2016]. However, 
+further research is needed on the association between special interest group 
+activity (which occurs before legislation passes) and age-agnostic rates of 
+suicide by gun. In this study, we begin to bridge that gap, exploring the 
+association between pre-legislative special interest group activity and 
+combined rates of suicide by firearm by state.
+
 According to the Centers for Disease Control and Prevention (CDC), suicide by 
 firearm accounts for more than half of gun deaths in the United States. While 
 school shootings, mass shootings, and high-profile assassinations are regularly 
@@ -399,15 +461,19 @@ We aggregate over ten million responses to CDC health surveys, three million
 special interest group reports, and suicide by firearm rates for all 50 states. 
 These data are then used to build a multiple linear regression model to control 
 for the impact of lobbying efforts and mental health on rates of suicide by gun.
-Therefore, our research question is: *Does increased pro-gun special interest* 
-*activity lead to additional suicide by gun, controlling for mental health?*
+We then use a novel weighting function to weigh each residual of that model, 
+culminating in a weighted linear regression model to predict suicides by gun per 
+100,000 citizens.
+
+Ultimately, we seek to answer the question: *Is increased pro-gun special*
+*interest activity associated with additional suicide by gun, controlling for*
+*mental health?*
 
 ## The Data
 
 We have aggregated and cleaned data from three distinct sources. First, mental 
-health data is pulled from the CDC 
-[Behavioral Risk Factor Surveillance Survey](https://www.cdc.gov/brfss/annual_data/annual_data.htm)
-(BRFSS). The survey began including mental health questions in 1994. The 
+health data is pulled from the CDC Behavioral Risk Factor Surveillance System
+[@CDC_2024]. The survey began including mental health questions in 1994. The 
 question of interest for this study is:
 
 *"Now thinking about your mental health, which includes stress, depression, and*
@@ -423,27 +489,24 @@ more days of poor mental health in a 30-day period as concerning, so we encode
 responses of 15 or greater as "Poor" and others as "Good."
 
 The CDC also provides absolute number and per-capita suicide data by state 
-through their [CDC WONDER](https://wonder.cdc.gov/cmf-icd10.html) platform. 
+through their CDC WONDER data archive portal [@CDC_WONDER_2024].
 Per-state proportions of suicides that were completed with firearms were 
-compiled by the [RAND Corporation](https://www.rand.org/pubs/tools/TL354.html), 
-a non-profit, non-partisan think tank that tracks and reports on several 
-high-profile political issues in the United States. We calculate total firearm 
+compiled by the Rand Corporation, a non-profit, non-partisan think tank that 
+tracks and reports on several high-profile political issues in the United 
+States [@Rand_2020]. We calculate total firearm 
 suicide deaths by multiplying the total suicides of all types reported by the 
-CDC and the proportion of those that were completed by firearm reported by RAND.
+CDC and the proportion of those that were completed by firearm reported by Rand.
 
-Special interest group activity is provided by 
-[Hall et al.](https://www.cambridge.org/core/journals/state-politics-and-policy-quarterly/article/chorus-a-new-dataset-of-state-interest-group-policy-positions-in-the-united-states/6827DC9EC72301016894F265777C0078) (2024). 
-Their special interest dataset reports 13,619,409 individual state-level special 
-interest group positions. We filter those positions using regular expression 
-filters built by hand from group names listed on
-[OpenSecrets](https://www.opensecrets.org/federal-lobbying/industries/lobbyists?cycle=2024&id=Q13), 
-the website of the eponymous non-profit organization that tracks lobbying groups 
-and campaign finance in Washington, DC. We aggregate firearm-related special 
-interest group activity by year and state. Once gun-related groups were 
-compiled, we manually reviewed the 1,168 groups to remove any anti-firearm 
-special interest groups from the data. Note that manual review is prone to human 
-error. Further details of these limitations are in the discussion section of 
-this article.
+Hall et al. created a special interest dataset reports 13,619,409 individual 
+state-level special interest group positions [@Hall_2024]. We filter those 
+positions using regular expression filters built by hand from group names listed 
+on OpenSecrets, the website of the eponymous non-profit organization that tracks 
+lobbying groups and campaign finance in Washington, DC. We aggregate 
+firearm-related special interest group activity by year and state
+[@OpenSecrets_2024]. Once gun-related groups were compiled, we manually reviewed 
+the 1,168 groups to remove any anti-firearm special interest groups from the 
+data. Note that manual review is prone to human error. Further details of these 
+limitations are in the discussion section of this article.
 
 Most year/state combinations have no special interest group representation 
 (i.e., the number of reported special interest statements is 0). Initially, we 
@@ -473,17 +536,16 @@ $\alpha=0.05$ level of significance.
 :::
 
 We evaluated the assumption of homoscedasticity (i.e., constant variance of 
-residuals) using a Breusch-Pagan (BP) test on our OLS model. However, with a 
-p-value of `r bp_unweighted`, our BP test showed a violation of 
-homoscedasticity. Figure 3 shows the distribution of residuals by state for our 
-OLS model. It is trivial to observe that residual variance differs widely 
-between states. To adjust for these changes in residual variance, we construct a 
-weighted linear regression model using weights derived from the following 
-equation:
+residuals) using a Breusch-Pagan (BP) test on our OLS model
+[@Breusch_Pagan_1979]. However, with a p-value of `r bp_unweighted`, our BP test 
+showed a violation of homoscedasticity. Figure 3 shows the distribution of 
+residuals by state for our OLS model. We observe that residual variance differs 
+widely between states. To adjust for these changes in residual variance, we 
+construct a weighted linear regression model using weights derived from the 
+following equation:
 $$
 w_i = \frac{1}{\sqrt{\left|r_i\right|}}
 $$
-
 
 where $r_i$ is the residual for observation $i$.
 
@@ -512,33 +574,31 @@ apparent.
 To verify the normality of our residuals, we conduct a Shapiro-Wilk test. A 
 significant p-value from a Shapiro-Wilk test (at the $\alpha=0.05$ level) was
 produced by the Shapiro-Wilk test, which rejects the null hypothesis that our 
-residuals come from a normal distribution. However, if we remove a single 
-residual (the largest one), our Shapiro-Wilk p-value becomes 0.8. Therefore, we 
-can be confident in the normality of our residuals with the exception of a 
-single outlier. Figure 6 shows the result of removing that outlier, and Figure 7 
-further verifies our model's normality using a quantile-quantile plot. 
+residuals come from a normal distribution [@Shapiro_Wilk_1965]. However, if we 
+remove a single residual (the largest one), our Shapiro-Wilk p-value becomes 
+0.8. Figure 6 shows that our outlier has a wide disparity between our two
+predictors both within its own state (Missouri) and between all states. That is
+it has exceptionally low pro-gun special interest activity and an exceptionally
+high proportion of citizens reporting poor mental health. Because the outlier is
+statistically exceptional, we can be confident in the normality of our residuals 
+with the exception of a single outlier. Figure 7 shows the result of removing 
+that outlier, and Figure 8 further verifies our model's normality using a 
+quantile-quantile plot. 
+
+![Outlier predictor exploration](plots/outlier_exploration.png){width=80%}
 
 ::: {layout-ncol=2}
-![Figure 6](plots/resid_distribution.png)
+![Figure 7](plots/resid_distribution.png)
 
-![Figure 7](plots/qqplot.png)
+![Figure 8](plots/qqplot.png)
 :::
 
-Now that we have verified the results of our model, we can display its results. 
-Figure 8 contains the weighted regression model output. Recall that states are 
+After confirming the validity of our model, we can display its results. 
+Figure 9 contains the weighted regression model output. Recall that states are 
 not included here but are corrected for. Results for all states in the dataset 
 are included in the appendix.
 
 ![Model output](tables/weighted_model_table.png){width=70%}
-
-Thus, our final model is given by the equation:
-$$
-y_i = 5.884 + 0.18ln(x_{1i}) + \beta_2x_{2i} + \epsilon
-$$
-
-where $x_1$ is the number of pro-gun statements in a state, $x_2$ state in
-question, $\beta_3$ per-state coefficient (each can be found in the appendix), 
-and $\epsilon$ is an error term.
 
 We observe from our model that, holding mental health and state constant, every
 $e$-fold increase (i.e., $\approx 2.72$-fold) in the number of pro-gun special
@@ -553,7 +613,7 @@ In this study, we found statistically significant evidence that, holding state
 of residence and self-reported mental health constant, increasing pro-gun 
 special interest group activity leads to additional suicide by gun. Perhaps 
 equally importantly, we have shown that, while holding pro-gun special interest 
-activity constant, self-reported mental health rates do not show a statistically
+activity constant, self-reported mental health rates do not show a statistically 
 significant impact on the rate of suicide by gun.
 
 However, there are some crucial limitations and room for further research. 
@@ -571,26 +631,51 @@ tagged with "pro-gun" and "anti-gun" when the dataset was created would help
 remove potential human error during filtering.
 
 Finally, although our results were statistically significant and passed model 
-assumption checks, we did need to remove an outlier residual to pass our 
-Shapiro-Wilk test. There may be additional covariates for which a broader 
-dataset may be able to correct to strengthen our confidence in our model 
-further.
+assumption checks, we did need to remove an outlier to pass our Shapiro-Wilk 
+test. There may be additional covariates for which a broader dataset may be able 
+to correct to strengthen our confidence in our model further.
+
+Different states have varying political environments, legislative processes, and 
+sentiments toward firearms and pro-gun organizations. Although these systemic 
+variations make broad policy recommendations challenging, we have shown that 
+decreased pro-gun special interest activity is associated with a reduction in 
+death across any state included in our data. National legislation reducing the 
+ability of large pro-gun organizations to influence state policy would save 
+lives. Because our special interest activity variable was log-transformed, 
+states with little (but non-zero) pro-gun lobbying activity are especially 
+susceptible to the dangerous effect of increases in such activity. That is, it 
+is easier to arrive at a 2.72-fold increase in special interest efforts when the 
+absolute number of those efforts is small.
+
+For states where pro-gun special interest statements are rare, we recommend 
+preventing additional pro-gun special interest efforts by classifying large 
+pro-gun special interest groups as threats to public health and reducing their 
+ability to influence state politics. Suicide by firearm is a public health issue 
+and should be treated as such.
 
 # Conclusion
 
 The American gun debate shows no signs of ceasing anytime soon. However, we have 
-shown that there is reasonable doubt to the claim that America's gun violence 
+shown that there is reason to doubt the claim that America's gun violence
 problems are caused by mental health alone. Although our result leaves room for 
 future research, there is statistically significant evidence that, even when 
-holding reported mental health status constant, pro-gun lobbying activity causes 
-deaths at an expected 3.38 deaths for each additional pro-gun special interest 
-effort. While there are philosophical aspects to the gun debate that statistics 
-can never affirm or deny, we can be reasonably confident that the specific claim 
-of mental health being the sole cause of American gun violence is not supported 
-by evidence. Although the dispute continues, we hope our humble contribution to 
-the national discussion can help advance the cause of rational, evidence-based 
-debate on this life-or-death issue.
+holding reported mental health constant, each 2.72-fold increase in pro-gun 
+activity is associated with 0.18 additional deaths per 100,000 people. In a 
+state like Texas (population approximately 30.5 million), that is an expected 55 
+additional deaths in Texas alone.
 
+Suicide by gun is a public health issue and should be treated as such. 
+Reciprocally, pro-gun special interests using mental health as a scapegoat for 
+this type of unnecessary death should be considered direct threats to public 
+health and be regulated as such. Our weighted linear regression model shows 
+that, correcting for state and pro-gun special interests, poor mental health 
+rates are not associated with an increase in suicide by gun. 
+
+We hope that our work can help forward the cause of reasoned debate for all 
+public health matters, especially suicide by gun. This type of death represents 
+a rare public health threat of our own making. However, through reasonable 
+debate and objective research, we can craft an effective response and save 
+lives.
 {{< pagebreak >}}
 
 # Appendix
@@ -628,3 +713,7 @@ full_table |>
 ```
 
 ![Full model results](tables/full_model_w_states.png){width=70%}
+
+{{< pagebreak >}}
+
+### References

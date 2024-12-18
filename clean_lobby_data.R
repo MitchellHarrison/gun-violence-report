@@ -36,4 +36,4 @@ gun_group_count <- gun_groups |>
   group_by(year, state) |>
   summarise(lobbyist_positions = n(), .groups = "drop")
 
-write_csv(gun_group_count, "gun_interest.csv")
+write_csv(gun_group_count, "data/gun_interest.csv")
